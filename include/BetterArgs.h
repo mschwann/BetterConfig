@@ -1,3 +1,4 @@
+#pragma once
 #include <tuple>
 #include <numeric>
 #include <optional>
@@ -5,6 +6,11 @@
 #include <fstream>
 #include <map>
 #include <vector>
+#include <iostream>
+#include <ranges>
+#include <cstdio>
+
+extern char **environ;
 
 namespace {
     static std::vector<std::string> splitString(const std::string& str, const std::string& delimiter)
@@ -61,6 +67,7 @@ namespace BetterArgsImpl
     template<typename... T> class BetterArgsBase;
     template<typename... T> class Cmd;
     template<typename... T> class File;
+    template<typename... T> class Env;
 };
 
 namespace BetterArgs
@@ -71,59 +78,72 @@ namespace BetterArgs
         bool isPopulated;
     };
     struct Exception : public std::runtime_error { template<typename T> Exception(T arg) : std::runtime_error(arg) {} };
-    
-    template<typename... T> struct Types
+
+    template<class... T> struct Types
     {
         using Base = BetterArgsImpl::BetterArgsBase<T...>;
         using Cmd = BetterArgsImpl::Cmd<T...>;
         using File = BetterArgsImpl::File<T...>;
+        using Env = BetterArgsImpl::Env<T...>;
     };
+
+    template <typename T, typename ...>
+    struct Cat
+    { using type = T; };
+
+    template <typename ... Ts1, typename ... Ts2, typename ... Ts3>
+    struct Cat<Types<Ts1...>, Types<Ts2...>, Ts3...>
+    : public Cat<Types<Ts1..., Ts2...>, Ts3...>
+    { };
+
 }
 
 namespace BetterArgsImpl
 {
-    //Can this be solved any better?
-    namespace TypeConvertion
+    //Some template magic to make it header-only. Can this be solved any better?
+    struct TypeConvertion
     {
-        template<typename T> T StringToT(std::string val)
+        template<typename T, typename> static T StringToT(std::string val)
         {
             return T();
         }
-        template<> int StringToT(std::string val)
+        
+        template<typename T, typename std::enable_if<std::is_same<T, int>::value>::type* = nullptr> static T StringToT(std::string val)
         {
             return std::stoi(val);
         }
 
-        template<> double StringToT(std::string val)
+        template<typename T, typename std::enable_if<std::is_same<T, double>::value>::type* = nullptr> static T StringToT(std::string val)
         {
             return std::stod(val);
         }
 
-        template<> std::string StringToT(std::string val)
+        template<typename T, typename std::enable_if<std::is_same<T, std::string>::value>::type* = nullptr> static T StringToT(std::string val)
         {
             return val;
         }
 
         //Complicated convertion for booleans, defaulting to true for flag usage.
-        template<> bool StringToT(std::string val)
+        template<typename T, typename std::enable_if<std::is_same<T, bool>::value>::type* = nullptr> static T StringToT(std::string val)
+        
         {
             if(val == "true" || val == "") return true;
             else if(val == "false") return false;
             return StringToT<int>(val);
         }
-    }
+    };
     
     template<typename... T> class BetterArgsBase : std::tuple<T...>
     {
         static_assert((is_base_of_template<BetterArgs::ArgumentDefinition, T>::value && ...), "Incorrect usage of BetterArgs::Cmd - use structures with BetterArgs::ArgumentDefinition as a base.");
         static_assert((hasStatic_name<T>::value && ...), "[!] One of the member classes has name implemented wrong - should be static constexpr char name[] = \"name\" ");
-	    static_assert((hasStatic_description<T>::value && ...), "[!] One of the member classes has description implemented wrong - should be static constexpr char description[] = \"description\" ");
+        static_assert((hasStatic_description<T>::value && ...), "[!] One of the member classes has description implemented wrong - should be static constexpr char description[] = \"description\" ");
        public:
             template<typename Functor> void for_each(Functor f){
                 ( f(std::get<T>(*this)), ...);
             }
 
-            template<typename U> std::optional<typename U::type&> getOptionalValue(){
+            template<typename U> std::optional<typename U::type> getOptionalValue(){
                 return std::get<U>(*this).isPopulated ? std::optional<typename U::type>(std::get<U>(*this).val) : std::nullopt;
             }
             template<typename U> void set(U::type val)
@@ -142,23 +162,23 @@ namespace BetterArgsImpl
             {
                 static_assert((is_base_of_template<BetterArgs::ArgumentDefinition, U>::value && ...), "Incorrect usage of BetterArgs::BetterArgsBase::checkMandatory - use structures with BetterArgs::ArgumentDefinition as a base.");
                 static_assert((hasStatic_name<U>::value && ...), "[!] One of the member classes has name implemented wrong - should be static constexpr char name[] = \"name\" ");
-	            static_assert((hasStatic_description<U>::value && ...), "[!] One of the member classes has description implemented wrong - should be static constexpr char description[] = \"description\" ");
+                static_assert((hasStatic_description<U>::value && ...), "[!] One of the member classes has description implemented wrong - should be static constexpr char description[] = \"description\" ");
                 auto throwCheckMandatoryElement = [&](auto t) -> void {
-                    if(t.isMandatory && !t.isPopulated)
+                    if(!t.isPopulated)
                     {
                         int unmangling_err;
                         auto unmangled = abi::__cxa_demangle(typeid(t.val).name(), 0, 0, &unmangling_err);
                         throw BetterArgs::Exception(std::string("BetterArgs : misssing mandatory argument \"") + t.name + "\"" + "("+std::string(unmangled)+")");
                     }
                 };
-                ( throwCheckMandatoryElement(std::get<T>(*this)), ...);
+                ( throwCheckMandatoryElement(std::get<U>(*this)), ...);
             }
 
             template<typename... U> void overrideWith(const BetterArgsBase<U...>& o)
             {
                 static_assert((is_base_of_template<BetterArgs::ArgumentDefinition, U>::value && ...), "Incorrect usage of BetterArgs::BetterArgsBase::overrideWith - use structures with BetterArgs::ArgumentDefinition as a base.");
                 static_assert((hasStatic_name<U>::value && ...), "[!] One of the member classes has name implemented wrong - should be static constexpr char name[] = \"name\" ");
-	            static_assert((hasStatic_description<U>::value && ...), "[!] One of the member classes has description implemented wrong - should be static constexpr char description[] = \"description\" ");
+                static_assert((hasStatic_description<U>::value && ...), "[!] One of the member classes has description implemented wrong - should be static constexpr char description[] = \"description\" ");
                 auto overrideArgImpl = [&](auto overArg)
                 {
                     if(overArg.isPopulated && (std::is_same<decltype(overArg), T>::value || ...))
@@ -188,10 +208,32 @@ namespace BetterArgsImpl
                 std::map<std::string, std::string> rawArgs;
                 for(int i = 1; i < argc ; i++)
                 {
-                    auto tokens = splitString(std::string(argv[i]), "=");
+                    auto tokens = splitString(argv[i], "=");//  | std::ranges::views::split("=")
                     //Two or less tokens
                     if(!tokens.empty() && tokens.size() <= 2)
+                    {
                         //No "=" means its a flag, so just add empty string.
+                        rawArgs.emplace(tokens[0], tokens.size() == 2? tokens[1] : "");
+                    }
+                    else
+                    {    //Add pair : tokens[0], "=".join(tokens[1:]);
+                        rawArgs.emplace(tokens[0], std::accumulate(tokens.begin()+2, tokens.end(), tokens[1], [](const auto& sum, const auto& elem){return sum + "=" + elem;}));
+                    }
+                }
+                BetterArgsBase<T...>::operator=(std::make_tuple<T...>(convertRawArg<T>(rawArgs)...));
+            }
+    };
+
+    template<typename... T> class Env : public BetterArgsBase<T...>
+    {
+        public:
+            Env()
+            {
+                std::map<std::string, std::string> rawArgs;
+                for (char **s = environ; *s; s++) {
+                    auto tokens = splitString(std::string(*s), "=");
+                    if(!tokens.empty() && tokens.size() <= 2)
+                        //No "=" means its a flag, so just add empty string (?)
                         rawArgs.emplace(tokens[0], tokens.size() == 2?tokens[1]:"");
                     else
                         //Add pair : tokens[0], "=".join(tokens[1:]);
@@ -215,6 +257,9 @@ namespace BetterArgsImpl
                 while (std::getline(f, line))
                 {
                     auto tokens = splitString(line, "=");
+                    /*for(auto token : tokens)
+                        std::cout << token << " ";
+                    std::cout << std::endl;*/
                     //Two or less tokens
                     if(!tokens.empty() && tokens.size() <= 2)
                         //No "=" means its a flag, so just add empty string (?)
